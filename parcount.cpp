@@ -4,6 +4,7 @@
 #include <chrono>                           // std::chrono::high_resolution_clock::now();
 #include <vector>                           // std::vector<>
 #include <mutex>                            // std::mutex
+#include <atomic>                           // std::atomic<bool>
 #include <unistd.h>                         // usleep()
 
 std::mutex sharedCounter_mtx;
@@ -90,8 +91,8 @@ int main(int argc, char *argv[]) {
     int i = 10000;
     int sharedCounter = 0;
     int tasBackoffBase = 1;
-    double tasBackoffCap = 150;
-    double tasBackoffMultiplier = 1.5;
+    double tasBackoffCap = 4;
+    double tasBackoffMultiplier = 1.25;
     std::vector<std::thread> threadVector;
 
     /*
@@ -113,7 +114,7 @@ int main(int argc, char *argv[]) {
         }
     }
     
-    std::cout << "Function Name\tFinal Counter Value\tThreads\tIncrements/Millisecond\tSeconds\n";
+    // std::cout << "Function Name\tFinal Counter Value\tThreads\tIncrements/Millisecond\tSeconds\n";
     
     /*
      * t threads each increment sharedCounter in parallel i times using a mutex
