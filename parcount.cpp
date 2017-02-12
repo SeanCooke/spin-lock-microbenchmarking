@@ -12,7 +12,7 @@ public:
     
     std::atomic<int> next_ticket = ATOMIC_VAR_INIT(0);
     std::atomic<int> now_serving = ATOMIC_VAR_INIT(0);
-    const int ticketLockBackoffBase = 2;
+    const double ticketLockBackoffBase = 1.25;
 
     /*
      * acquire gives the thread the the lock when
