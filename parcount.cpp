@@ -7,12 +7,12 @@
 #include <atomic>                           // std::atomic<bool>
 #include <unistd.h>                         // usleep()
 
-class TicketLockBackoff {
-    
+class TicketLock {
 public:
+    
     std::atomic<int> next_ticket = ATOMIC_VAR_INIT(0);
     std::atomic<int> now_serving = ATOMIC_VAR_INIT(0);
-    const int base = 2;
+    const int ticketLockBackoffBase = 2;
 
     /*
      * acquire gives the thread the the lock when
@@ -31,7 +31,28 @@ public:
             if(ns == my_ticket) {
                 break;
             }
-            usleep(base * (my_ticket-ns));
+            atomic_thread_fence(std::memory_order_seq_cst);
+        }
+    }
+    
+    /*
+     * acquire gives the thread the the lock when
+     * thread.my_ticket = thread.now_serving using a backoff
+     *
+     * Input Arguments:
+     * None
+     *
+     * Return Values:
+     * None
+     */
+    void acquireBackoff() {
+        int my_ticket = std::atomic_fetch_add(&next_ticket, 1);
+        while(true) {
+            int ns = now_serving.load(std::memory_order_relaxed);
+            if(ns == my_ticket) {
+                break;
+            }
+            usleep(ticketLockBackoffBase * (my_ticket-ns));
             atomic_thread_fence(std::memory_order_seq_cst);
         }
     }
@@ -55,7 +76,7 @@ public:
 std::mutex sharedCounter_mtx;
 std::atomic<bool> start(false);             // to ensure threads run in parallel
 std::atomic_flag lock = ATOMIC_FLAG_INIT;
-TicketLockBackoff ticketLockBackoff;
+TicketLock ticketLock;
 
 /*
  * incrementiTimesMutexLock will lock a mutex, run the commnad '++sharedCounter'
@@ -131,8 +152,27 @@ void incrementiTimesTASBackoff(int& sharedCounter, int& i, int tasBackoffBase, d
 }
 
 /*
- * incrementiTimesTicketBackoff will acquire a ticketLockBackoff,
- * run the commnad '++sharedCounter' i times, then release the ticketLockBackoff
+ * incrementiTimesTicketBackoff will acquire a ticketLock, run the commnad
+ * '++sharedCounter' i times, then release the ticketLock
+ *
+ * * Input Arguments:
+ * sharedCounter - reference to variable increment i times
+ * i - reference to the number of times to increment sharedCounter
+ *
+ * Return Values:
+ * None
+ */
+void incrementiTimesTicket(int& sharedCounter, int& i) {
+    ticketLock.acquire();
+    for(int incrementCounter = 0; incrementCounter < i; ++incrementCounter) {
+        ++sharedCounter;
+    }
+    ticketLock.release();
+}
+
+/*
+ * incrementiTimesTicketBackoff will acquire a ticketLock with a backoff,
+ * run the commnad '++sharedCounter' i times, then release the ticketLock
  *
  * * Input Arguments:
  * sharedCounter - reference to variable increment i times
@@ -142,11 +182,11 @@ void incrementiTimesTASBackoff(int& sharedCounter, int& i, int tasBackoffBase, d
  * None
  */
 void incrementiTimesTicketBackoff(int& sharedCounter, int& i) {
-    ticketLockBackoff.acquire();
+    ticketLock.acquireBackoff();
     for(int incrementCounter = 0; incrementCounter < i; ++incrementCounter) {
         ++sharedCounter;
     }
-    ticketLockBackoff.release();
+    ticketLock.release();
 }
 
 int main(int argc, char *argv[]) {
@@ -246,6 +286,29 @@ int main(int argc, char *argv[]) {
     tDelta = t2-t1;
     seconds = tDelta.count();
     std::cout << "incrementiTimesTASBackoff\t" << sharedCounter<< "\t" << t << "\t" << sharedCounter*1000/seconds << "\t" << seconds << "\n";
+    threadVector.clear();
+    sharedCounter = 0;
+    start = false;
+
+    /*
+     * t threads each increment sharedCounter in parallel i times using a ticket lock
+     * sharedCounter will be set to i*t
+     *
+     * t, Increments/Millisecond, and seconds will be printed, threadVector, sharedCounter
+     * and start will be reset
+     */
+    for(int iterator = 0; iterator < t; ++iterator) {
+        threadVector.push_back(std::thread(incrementiTimesTicket, std::ref(sharedCounter), std::ref(i)));
+    }
+    t1 = std::chrono::high_resolution_clock::now();
+    start = true;
+    for(auto& t : threadVector) {
+        t.join();
+    }
+    t2 = std::chrono::high_resolution_clock::now();
+    tDelta = t2-t1;
+    seconds = tDelta.count();
+    std::cout << "incrementiTimesTicket\t" << sharedCounter<< "\t" << t << "\t" << sharedCounter*1000/seconds << "\t" << seconds << "\n";
     threadVector.clear();
     sharedCounter = 0;
     start = false;
