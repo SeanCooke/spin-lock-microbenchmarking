@@ -5,7 +5,22 @@
 #include <vector>                           // std::vector<>
 #include <mutex>                            // std::mutex
 #include <atomic>                           // std::atomic<bool>
-#include <unistd.h>                         // usleep()
+
+/*
+ * pause is an empty loop that iterates k times
+ *
+ * Input Arguments:
+ * k - integer number of loop iterations
+ *
+ * Return Values:
+ * None
+ */
+void pause(int k) {
+    int iterator = 0;
+    while(iterator < k) {
+        ++iterator;
+    }
+}
 
 class TicketLock {
 public:
@@ -52,7 +67,7 @@ public:
             if(ns == my_ticket) {
                 break;
             }
-            usleep(ticketLockBackoffBase * (my_ticket-ns));
+            pause(ticketLockBackoffBase * (my_ticket-ns));
             atomic_thread_fence(std::memory_order_seq_cst);
         }
     }
@@ -142,7 +157,7 @@ void incrementiTimesTASBackoff(int& sharedCounter, int& i, int tasBackoffBase, d
     while (!start.load());
     double tasBackoffValue = tasBackoffBase;
     while (lock.test_and_set()) {
-        usleep(tasBackoffValue);
+        pause(tasBackoffValue);
         tasBackoffValue = std::min(tasBackoffValue*tasBackoffMultiplier, tasBackoffCap);
     }
     for(int incrementCounter = 0; incrementCounter < i; ++incrementCounter) {
