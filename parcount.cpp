@@ -88,10 +88,67 @@ public:
 
 };
 
+// qnodeMCS' are linked-list nodes that implement MCSLock
+struct qnodeMCS {
+    std::atomic<qnodeMCS*> next;
+    std::atomic<bool> waiting;
+};
+
+class MCSLock {
+public:
+    
+    std::atomic<qnodeMCS*> tail;
+    
+    /*
+     * acquire acquires a MC5Lock
+     *
+     * Input Arguments:
+     * p - qnodeMCS pointer allocated by thread
+     *
+     * Return Values:
+     * None
+     */
+    void acquire(qnodeMCS* p) {
+        p->next = NULL;
+        p->waiting = true;
+        qnodeMCS* prev;
+        prev = tail.exchange(p, std::memory_order_seq_cst);
+        if (prev != NULL) {
+            prev->next.store(p, std::memory_order_acquire);
+            while(p->waiting.load());
+        }
+        atomic_thread_fence(std::memory_order_acquire);
+    }
+    
+    /*
+     * release releases a MC5Lock
+     *
+     * Input Arguments:
+     * p - qnodeMCS pointer allocated by thread
+     *
+     * Return Values:
+     * None
+     */
+    void release(qnodeMCS* p) {
+        qnodeMCS* succ = p->next.load();
+        if (succ == nullptr) {
+            if(tail.compare_exchange_strong(p, NULL, std::memory_order_acquire, std::memory_order_seq_cst)) {
+                return;
+            }
+            while(succ != nullptr) {
+                succ = p->next.load();
+            }
+        }
+        succ->waiting.store(false);
+    }
+    
+};
+
 std::mutex sharedCounter_mtx;
 std::atomic<bool> start(false);             // to ensure threads run in parallel
 std::atomic_flag lock = ATOMIC_FLAG_INIT;
 TicketLock ticketLock;
+MCSLock mcsLock;
 
 /*
  * incrementiTimesMutexLock will lock a mutex, run the commnad '++sharedCounter'
@@ -167,8 +224,8 @@ void incrementiTimesTASBackoff(int& sharedCounter, int& i, int tasBackoffBase, d
 }
 
 /*
- * incrementiTimesTicketBackoff will acquire a ticketLock, run the commnad
- * '++sharedCounter' i times, then release the ticketLock
+ * incrementiTimesTicketBackoff will acquire a TicketLock, run the commnad
+ * '++sharedCounter' i times, then release the TicketLock
  *
  * * Input Arguments:
  * sharedCounter - reference to variable increment i times
@@ -186,8 +243,8 @@ void incrementiTimesTicket(int& sharedCounter, int& i) {
 }
 
 /*
- * incrementiTimesTicketBackoff will acquire a ticketLock with a backoff,
- * run the commnad '++sharedCounter' i times, then release the ticketLock
+ * incrementiTimesTicketBackoff will acquire a TicketLock with a backoff,
+ * run the commnad '++sharedCounter' i times, then release the TicketLock
  *
  * * Input Arguments:
  * sharedCounter - reference to variable increment i times
@@ -202,6 +259,27 @@ void incrementiTimesTicketBackoff(int& sharedCounter, int& i) {
         ++sharedCounter;
     }
     ticketLock.release();
+}
+
+/*
+ * incrementiTimesMCS will acquire a MCSLock,
+ * run the commnad '++sharedCounter' i times, then release the MCSLock
+ *
+ * * Input Arguments:
+ * sharedCounter - reference to variable increment i times
+ * i - reference to the number of times to increment sharedCounter
+ *
+ * Return Values:
+ * None
+ */
+void incrementiTimesMCS(int& sharedCounter, int& i) {
+    std::atomic<qnodeMCS*> p;
+    p = new (qnodeMCS);
+    mcsLock.acquire(p);
+    for(int incrementCounter = 0; incrementCounter < i; ++incrementCounter) {
+        ++sharedCounter;
+    }
+    mcsLock.release(p);
 }
 
 int main(int argc, char *argv[]) {
@@ -347,6 +425,29 @@ int main(int argc, char *argv[]) {
     tDelta = t2-t1;
     seconds = tDelta.count();
     std::cout << "incrementiTimesTicketBackoff\t" << sharedCounter<< "\t" << t << "\t" << sharedCounter*1000/seconds << "\t" << seconds << "\n";
+    threadVector.clear();
+    sharedCounter = 0;
+    start = false;
+    
+    /*
+     * t threads each increment sharedCounter in parallel i times using a MCS lock
+     * sharedCounter will be set to i*t
+     *
+     * t, Increments/Millisecond, and seconds will be printed, threadVector, sharedCounter
+     * and start will be reset
+     */
+    for(int iterator = 0; iterator < t; ++iterator) {
+        threadVector.push_back(std::thread(incrementiTimesMCS, std::ref(sharedCounter), std::ref(i)));
+    }
+    t1 = std::chrono::high_resolution_clock::now();
+    start = true;
+    for(auto& t : threadVector) {
+        t.join();
+    }
+    t2 = std::chrono::high_resolution_clock::now();
+    tDelta = t2-t1;
+    seconds = tDelta.count();
+    std::cout << "incrementiTimesMCS\t" << sharedCounter<< "\t" << t << "\t" << sharedCounter*1000/seconds << "\t" << seconds << "\n";
     threadVector.clear();
     sharedCounter = 0;
     start = false;
