@@ -144,11 +144,101 @@ public:
     
 };
 
+// qnodeK42MCS' are nodes that implement MCSLock
+struct qnodeK42MCS {
+    std::atomic<qnodeK42MCS*> tail;
+    std::atomic<qnodeK42MCS*> next;
+    
+    qnodeK42MCS(qnodeK42MCS* tail, qnodeK42MCS* next) : tail(tail), next(next) {}
+};
+
+const qnodeK42MCS* WAITING = (qnodeK42MCS*) 1;
+
+class K42MCSLock {
+public:
+    
+    qnodeK42MCS q;
+    K42MCSLock() : q(NULL, NULL) {}
+    
+    /*
+     * acquire acquires a K42MCSLock
+     *
+     * Input Arguments:
+     * None
+     *
+     * Return Values:
+     * None
+     */
+    void acquire() {
+        while(true) {
+            qnodeK42MCS* prev = q.tail.load();
+            if (prev == NULL) {                                                                     // lock appears to be free
+                qnodeK42MCS* nullPtr = nullptr;
+                if(q.tail.compare_exchange_strong(nullPtr, &q, std::memory_order_seq_cst)) {
+                    break;
+                }
+            }
+            else {
+                qnodeK42MCS n((qnodeK42MCS*)WAITING, NULL);
+                if(q.tail.compare_exchange_strong(prev, &n, std::memory_order_seq_cst)) {           // we're in line
+                    prev->next.store(&n);
+                    while(n.tail.load() == WAITING);                                                // spin
+                    // now we have the lock
+                    qnodeK42MCS* succ = n.next.load();
+                    if(succ == NULL) {
+                        q.next.store(NULL);
+                        // try to make lock point at itself
+                        qnodeK42MCS* nAddress = &n;
+                        if(!q.tail.compare_exchange_strong(nAddress, &q, std::memory_order_seq_cst)) {
+                            // somebody got into the timing window
+                            while(succ == NULL) {
+                                succ = n.next.load();
+                            }
+                            q.next.store(succ);
+                        }
+                        break;
+                    }
+                    else {
+                        q.next.store(succ);
+                        break;
+                    }
+                }
+            }
+        }
+        atomic_thread_fence(std::memory_order_seq_cst);
+    }
+
+    /*
+     * release releases a K42MCSLock
+     *
+     * Input Arguments:
+     * None
+     *
+     * Return Values:
+     * None
+     */
+    void release() {
+        qnodeK42MCS* succ = q.next.load(std::memory_order_seq_cst);
+        if (succ == NULL) {
+            qnodeK42MCS* qAddress = &q;
+            if(q.tail.compare_exchange_strong(qAddress, NULL, std::memory_order_seq_cst)) {
+                return;
+            }
+            while(succ == NULL) {
+                succ = q.next.load();
+            }
+        }
+        succ->tail.store(NULL);
+    }
+    
+};
+
 std::mutex sharedCounter_mtx;
 std::atomic<bool> start(false);             // to ensure threads run in parallel
 std::atomic_flag lock = ATOMIC_FLAG_INIT;
 TicketLock ticketLock;
 MCSLock mcsLock;
+K42MCSLock k42MCSLock;
 
 /*
  * incrementiTimesMutexLock will lock a mutex, run the commnad '++sharedCounter'
@@ -280,6 +370,25 @@ void incrementiTimesMCS(int& sharedCounter, int& i) {
         ++sharedCounter;
     }
     mcsLock.release(p);
+}
+
+/*
+ * incrementiTimesMCS will acquire a K42MCSLock,
+ * run the commnad '++sharedCounter' i times, then release the K42MCSLock
+ *
+ * * Input Arguments:
+ * sharedCounter - reference to variable increment i times
+ * i - reference to the number of times to increment sharedCounter
+ *
+ * Return Values:
+ * None
+ */
+void incrementiTimesK42MCS(int& sharedCounter, int& i) {
+    k42MCSLock.acquire();
+    for(int incrementCounter = 0; incrementCounter < i; ++incrementCounter) {
+        ++sharedCounter;
+    }
+    k42MCSLock.release();
 }
 
 int main(int argc, char *argv[]) {
@@ -452,4 +561,27 @@ int main(int argc, char *argv[]) {
     sharedCounter = 0;
     start = false;
     
+    /*
+     * t threads each increment sharedCounter in parallel i times using a K42 MCS lock
+     * sharedCounter will be set to i*t
+     *
+     * t, Increments/Millisecond, and seconds will be printed, threadVector, sharedCounter
+     * and start will be reset
+     */
+    for(int iterator = 0; iterator < t; ++iterator) {
+        threadVector.push_back(std::thread(incrementiTimesK42MCS, std::ref(sharedCounter), std::ref(i)));
+    }
+    t1 = std::chrono::high_resolution_clock::now();
+    start = true;
+    for(auto& t : threadVector) {
+        t.join();
+    }
+    t2 = std::chrono::high_resolution_clock::now();
+    tDelta = t2-t1;
+    seconds = tDelta.count();
+    std::cout << "incrementiTimesK42MCS\t" << sharedCounter<< "\t" << t << "\t" << sharedCounter*1000/seconds << "\t" << seconds << "\n";
+    threadVector.clear();
+    sharedCounter = 0;
+    start = false;
+
 }
